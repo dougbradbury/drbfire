@@ -86,7 +86,7 @@ require 'timeout'
 module DRbFire
   # The current version.
   VERSION = [0, 1, 0]
-  
+
   # The role configuration key.
   ROLE = "#{self}::ROLE"
 
@@ -150,7 +150,7 @@ module DRbFire
 
       def open
         @connection.stream.write("0")
-        timeout(20) do
+        timeout(2) do
           @queue.pop
         end
       rescue TimeoutError
@@ -162,17 +162,17 @@ module DRbFire
       def open_server(uri, config)
         # make sure the scheme is ours
         parse_uri(uri)
-        
-        if(server?(config))
-          @client_servers ||= {}
-          
+
+        if (server?(config))
+          @client_server_proxies ||= {}
+
           sock = delegate(config).open_server(uri, config)
-          
+
           # get the uri from the delegate, and replace the scheme with drbfire://
           # this allows randomly chosen ports (:0) to work
           scheme = sock.uri.match(/^(.*):\/\//)[1]
           drbfire_uri = sock.uri.sub(scheme, SCHEME)
-          
+
           new(drbfire_uri, sock)
         else
           ClientServer.new(uri, config)
@@ -180,31 +180,32 @@ module DRbFire
       end
 
       def open(uri, config, type=INCOMING_CONN)
-        unless(server?(config))
+        unless (server?(config))
           connection = new(uri, delegate(config).open(uri, config))
+          set_sockopt(connection)
           connection.stream.write(type)
           connection
         else
-          @client_servers[parse_uri(uri).last.to_i].open
+          @client_server_proxies[parse_uri(uri).last.to_i].open
         end
       end
 
       def add_client_connection(id, connection)
-        if((c = @client_servers[id]))
-          c.push(connection)
+        if ((client_server_proxy = @client_server_proxies[id]))
+          client_server_proxy.push(connection)
         else
         end
       end
 
-      def add_client_server(id, server)
-        @client_servers[id] = server
+      def add_client_server_proxies(id, server)
+        @client_server_proxies[id] = server
       end
 
-     def parse_uri(uri)
-        if(%r{^#{SCHEME}://([^:]+):(\d+)(?:\?(.+))?$} =~ uri)
+      def parse_uri(uri)
+        if (%r{^#{SCHEME}://([^:]+):(\d+)(?:\?(.+))?$} =~ uri)
           [$1, $2.to_i, $3]
         else
-          raise DRb::DRbBadScheme, uri unless(/^#{SCHEME}/ =~ uri)
+          raise DRb::DRbBadScheme, uri unless (/^#{SCHEME}/ =~ uri)
           raise DRb::DRbBadURI, "Can't parse uri: #{uri}"
         end
       end
@@ -217,12 +218,12 @@ module DRbFire
       private
 
       def server?(config)
-        raise "Invalid configuration" unless(config.include?(ROLE))
+        raise "Invalid configuration" unless (config.include?(ROLE))
         config[ROLE] == SERVER
       end
 
       def delegate(config)
-        unless(defined?(@delegate))
+        unless (defined?(@delegate))
           @delegate = Class.new(config[DELEGATE] || DRb::DRbTCPSocket) do
             class << self
               attr_writer :delegate
@@ -251,10 +252,20 @@ module DRbFire
       @id_mutex = Mutex.new
     end
 
+    def self.set_sockopt(connection)
+      begin
+        connection.stream.setsockopt(Socket::SOL_TCP, Socket::SO_KEEPALIVE, true)
+        connection.stream.setsockopt(Socket::SOL_TCP, Socket::SO_SNDTIMEO, 2000)
+      rescue Exception => e
+        # log.error "Failed on sockopts:  #{e}"
+      end
+    end
+
     def accept
-      while(__getobj__.instance_eval{@socket})
+      while (__getobj__.instance_eval{@socket})
         begin
-          connection = self.class.new(nil, __getobj__.accept)
+          delegate_accept_result = __getobj__.accept
+          connection = self.class.new(nil, delegate_accept_result)
         rescue IOError
           return nil
         end
@@ -263,23 +274,26 @@ module DRbFire
         rescue
           next
         end
+        self.class.set_sockopt(connection)
         case type
-        when INCOMING_CONN
-          return connection
-        when OUTGOING_CONN
-          self.class.add_client_connection(connection.read_signal_id, connection)
-          next
-        when SIGNAL_CONN
-          new_id = nil
-          @id_mutex.synchronize do
-            new_id = (@id += 1)
-          end
-          client_server = ClientServerProxy.new(connection, new_id)
-          self.class.add_client_server(new_id, client_server)
-          client_server.write_signal_id
-          next
-        else
-          raise "Invalid type #{type}"
+          when INCOMING_CONN
+            return connection
+          when OUTGOING_CONN
+            self.class.add_client_connection(connection.read_signal_id, connection)
+            next
+          when SIGNAL_CONN
+            new_id = nil
+            @id_mutex.synchronize do
+              new_id = (@id += 1)
+            end
+            client_server_proxy = ClientServerProxy.new(connection, new_id)
+            self.class.add_client_server_proxies(new_id, client_server_proxy)
+            client_server_proxy.write_signal_id
+            next
+          else
+            # log.warn "Invalid drbfire socket type #{type.inspect} delegating to plain old drb"
+            connection.stream.ungetc(type[0]) unless type.nil?
+            return delegate_accept_result
         end
       end
     end
