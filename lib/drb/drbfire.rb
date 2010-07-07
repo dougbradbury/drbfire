@@ -85,7 +85,7 @@ require 'timeout'
 
 module DRbFire
   # The current version.
-  VERSION = [0, 1, 0]
+  VERSION = [0, 1, 1]
 
   # The role configuration key.
   ROLE = "#{self}::ROLE"
