@@ -146,13 +146,13 @@ module DRbFire
       OUTGOING_CONNECTION_TIMEOUT = 20
 
       def initialize(connection, signal_id)
-        @connection = connection
+        @signal_connection = connection
         @signal_id = signal_id
         @queue = Queue.new
       end
 
       def write_signal_id
-        @connection.stream.write([@signal_id].pack(ID_FORMAT))
+        @signal_connection.stream.write([@signal_id].pack(ID_FORMAT))
       end
 
       def push(connection)
@@ -160,7 +160,7 @@ module DRbFire
       end
 
       def signal_client_to_open_outgoing_connection
-        @connection.stream.write("0")
+        @signal_connection.stream.write("0")
       end
 
       def wait_for_outgoing_connection
@@ -175,6 +175,7 @@ module DRbFire
         signal_client_to_open_outgoing_connection
         return wait_for_outgoing_connection
       rescue TimeoutError
+        @signal_connection.close
         raise DRb::DRbConnError, "#{@signal_id} Unable to get a client connection."
       end
     end
@@ -278,7 +279,7 @@ module DRbFire
       # log.info("#{@signal_id} Closing Connection")
       __getobj__.close
     end
-    
+
     def self.set_sockopt(connection)
       begin
         connection.stream.setsockopt(Socket::SOL_TCP, Socket::SO_KEEPALIVE, true)
